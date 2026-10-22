@@ -5,6 +5,8 @@ InfiRay Tiny1-C module (USB `0bda:5830`, 256×192, firmware `TC1_V1.02`). It rep
 the Windows-only "QianLi IR" app (`PCBDiagnose.exe`), which talks to the camera through
 libusb/WinUSB and therefore does not work under Wine.
 
+![Viewer window with RECORD button, temperature overlay and markers](thermal_view_screen.png)
+
 ## How it works
 
 The camera enumerates as a standard UVC webcam but sends black frames until it receives

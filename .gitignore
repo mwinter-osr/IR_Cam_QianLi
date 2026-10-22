@@ -7,5 +7,6 @@ thermal_*.png
 thermal_*.npy
 thermal_*.mp4
 thermal_*.mkv
+!thermal_view_screen.png
 
 __pycache__/
