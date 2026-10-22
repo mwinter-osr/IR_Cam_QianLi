@@ -17,7 +17,8 @@ gray16le, value / 64 = Kelvin).
 Keys: q quit · s save snapshot (PNG + .npy in °C) · v start/stop video recording
       c next colormap · r reset range lock · l lock range
       f shutter / recalibrate now · + / - emissivity ±0.05
-Mouse: hover shows the temperature under the cursor.
+Mouse: hover shows the temperature under the cursor; the RECORD/STOP button in the
+       toolbar above the image does the same as v.
 """
 import argparse
 import glob
@@ -228,6 +229,32 @@ def render(temp, cmap, lo, hi, scale, mouse, info=""):
     return img
 
 
+TOOLBAR_H = 36
+REC_BUTTON = (8, 5, 130, 31)    # x1, y1, x2, y2 in window coordinates
+
+
+def in_rect(rect, x, y):
+    return rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+
+
+def toolbar(width, rec):
+    """The strip above the image; it is shown on screen only, never recorded or saved."""
+    bar = np.full((TOOLBAR_H, width, 3), 48, np.uint8)
+    x1, y1, x2, y2 = REC_BUTTON
+    if rec:
+        secs = int(rec.elapsed())
+        cv2.rectangle(bar, (x1, y1), (x2, y2), (40, 40, 200), -1)
+        cv2.rectangle(bar, (x1 + 10, y1 + 8), (x1 + 20, y1 + 18), (255, 255, 255), -1)
+        text = f"STOP {secs // 60:02d}:{secs % 60:02d}"
+    else:
+        cv2.rectangle(bar, (x1, y1), (x2, y2), (80, 80, 80), -1)
+        cv2.circle(bar, (x1 + 15, y1 + 13), 6, (0, 0, 255), -1)
+        text = "RECORD"
+    cv2.rectangle(bar, (x1, y1), (x2, y2), (160, 160, 160), 1)
+    cv2.putText(bar, text, (x1 + 28, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return bar
+
+
 def settings_text(settings):
     return (f"e={settings['emissivity']:.2f}  dist {settings['distance']:.2f}m  "
             f"refl {settings['reflected']:.0f}C  amb {settings['ambient']:.0f}C  "
@@ -304,10 +331,13 @@ def main():
 
     win = "Thermal camera"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
-    mouse = []
+    mouse, clicks = [], []
 
     def on_mouse(event, x, y, *_):
-        mouse[:] = [x, y]
+        # mouse holds image coordinates; empty while the pointer is over the toolbar
+        mouse[:] = [x, y - TOOLBAR_H] if y >= TOOLBAR_H else []
+        if event == cv2.EVENT_LBUTTONDOWN and in_rect(REC_BUTTON, x, y):
+            clicks.append(REC_BUTTON)
 
     cv2.setMouseCallback(win, on_mouse)
     cmap_idx, locked, rec = 0, None, None
@@ -318,25 +348,21 @@ def main():
             if temp is None:
                 img = np.zeros((H * args.scale, W * args.scale, 3), np.uint8)
                 cv2.putText(img, "waiting for camera...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-                shown = img
             else:
                 lo, hi = locked or (float(temp.min()), float(temp.max()))
                 img = render(temp, COLORMAPS[cmap_idx][1], lo, hi, args.scale, mouse, settings_text(settings))
-                shown = img
                 if rec:
                     rec.write(img, frame[0])
-                    # the indicator is only drawn on screen, not into the recording
-                    shown = img.copy()
-                    cv2.circle(shown, (shown.shape[1] - 90, 16), 6, (0, 0, 255), -1)
-                    secs = int(rec.elapsed())
-                    cv2.putText(shown, f"REC {secs // 60:02d}:{secs % 60:02d}", (shown.shape[1] - 78, 21),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-            cv2.imshow(win, shown)
+            cv2.imshow(win, np.vstack([toolbar(img.shape[1], rec), img]))
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
                 break
             if temp is None:
+                clicks.clear()
                 continue
+            if clicks:
+                clicks.clear()
+                key = ord("v")
             if key == ord("c"):
                 cmap_idx = (cmap_idx + 1) % len(COLORMAPS)
             elif key == ord("l"):
