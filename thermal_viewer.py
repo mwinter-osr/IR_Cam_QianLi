@@ -17,8 +17,8 @@ gray16le, value / 64 = Kelvin).
 Keys: q quit · s save snapshot (PNG + .npy in °C) · v start/stop video recording
       c next colormap · r reset range lock · l lock range
       f shutter / recalibrate now · + / - emissivity ±0.05
-Mouse: hover shows the temperature under the cursor; the RECORD/STOP button in the
-       toolbar above the image does the same as v.
+Mouse: hover shows the temperature under the cursor; the RECORD/STOP and SNAPSHOT
+       buttons in the toolbar above the image do the same as v and s.
 """
 import argparse
 import glob
@@ -230,28 +230,42 @@ def render(temp, cmap, lo, hi, scale, mouse, info=""):
 
 
 TOOLBAR_H = 36
-REC_BUTTON = (8, 5, 130, 31)    # x1, y1, x2, y2 in window coordinates
+# toolbar buttons: the key they act like -> x1, y1, x2, y2 in window coordinates
+BUTTONS = {"v": (8, 5, 130, 31), "s": (138, 5, 260, 31)}
+SNAPSHOT_FLASH = 1.0    # seconds the snapshot button shows "SAVED"
 
 
 def in_rect(rect, x, y):
     return rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
 
 
-def toolbar(width, rec):
+def toolbar(width, rec, last_snapshot):
     """The strip above the image; it is shown on screen only, never recorded or saved."""
     bar = np.full((TOOLBAR_H, width, 3), 48, np.uint8)
-    x1, y1, x2, y2 = REC_BUTTON
+
+    def button(rect, fill, text):
+        x1, y1, x2, y2 = rect
+        cv2.rectangle(bar, (x1, y1), (x2, y2), fill, -1)
+        cv2.rectangle(bar, (x1, y1), (x2, y2), (160, 160, 160), 1)
+        cv2.putText(bar, text, (x1 + 28, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+        return x1, y1
+
     if rec:
         secs = int(rec.elapsed())
-        cv2.rectangle(bar, (x1, y1), (x2, y2), (40, 40, 200), -1)
+        x1, y1 = button(BUTTONS["v"], (40, 40, 200), f"STOP {secs // 60:02d}:{secs % 60:02d}")
         cv2.rectangle(bar, (x1 + 10, y1 + 8), (x1 + 20, y1 + 18), (255, 255, 255), -1)
-        text = f"STOP {secs // 60:02d}:{secs % 60:02d}"
     else:
-        cv2.rectangle(bar, (x1, y1), (x2, y2), (80, 80, 80), -1)
+        x1, y1 = button(BUTTONS["v"], (80, 80, 80), "RECORD")
         cv2.circle(bar, (x1 + 15, y1 + 13), 6, (0, 0, 255), -1)
-        text = "RECORD"
-    cv2.rectangle(bar, (x1, y1), (x2, y2), (160, 160, 160), 1)
-    cv2.putText(bar, text, (x1 + 28, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+    if time.time() - last_snapshot < SNAPSHOT_FLASH:
+        x1, y1 = button(BUTTONS["s"], (60, 140, 60), "SAVED")
+    else:
+        x1, y1 = button(BUTTONS["s"], (80, 80, 80), "SNAPSHOT")
+    # camera icon
+    cv2.rectangle(bar, (x1 + 7, y1 + 8), (x1 + 23, y1 + 19), (255, 255, 255), 1)
+    cv2.rectangle(bar, (x1 + 11, y1 + 6), (x1 + 16, y1 + 8), (255, 255, 255), -1)
+    cv2.circle(bar, (x1 + 15, y1 + 13), 3, (255, 255, 255), 1)
     return bar
 
 
@@ -336,11 +350,11 @@ def main():
     def on_mouse(event, x, y, *_):
         # mouse holds image coordinates; empty while the pointer is over the toolbar
         mouse[:] = [x, y - TOOLBAR_H] if y >= TOOLBAR_H else []
-        if event == cv2.EVENT_LBUTTONDOWN and in_rect(REC_BUTTON, x, y):
-            clicks.append(REC_BUTTON)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            clicks.extend(k for k, rect in BUTTONS.items() if in_rect(rect, x, y))
 
     cv2.setMouseCallback(win, on_mouse)
-    cmap_idx, locked, rec = 0, None, None
+    cmap_idx, locked, rec, last_snapshot = 0, None, None, 0.0
     try:
         while True:
             frame = cam.read_frame()
@@ -353,7 +367,7 @@ def main():
                 img = render(temp, COLORMAPS[cmap_idx][1], lo, hi, args.scale, mouse, settings_text(settings))
                 if rec:
                     rec.write(img, frame[0])
-            cv2.imshow(win, np.vstack([toolbar(img.shape[1], rec), img]))
+            cv2.imshow(win, np.vstack([toolbar(img.shape[1], rec, last_snapshot), img]))
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
                 break
@@ -361,8 +375,8 @@ def main():
                 clicks.clear()
                 continue
             if clicks:
+                key = ord(clicks.pop(0))
                 clicks.clear()
-                key = ord("v")
             if key == ord("c"):
                 cmap_idx = (cmap_idx + 1) % len(COLORMAPS)
             elif key == ord("l"):
@@ -389,6 +403,7 @@ def main():
                 base = os.path.join(args.outdir, time.strftime("thermal_%Y%m%d_%H%M%S"))
                 cv2.imwrite(base + ".png", img)
                 np.save(base + ".npy", temp)
+                last_snapshot = time.time()
                 print(f"saved {base}.png / .npy")
     finally:
         if rec:

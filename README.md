@@ -47,9 +47,9 @@ python3 thermal_viewer.py --help
 
 Keys: `q` quit · `s` snapshot (PNG + `.npy` in °C) · `v` start/stop recording · `c` colormap · `l`/`r` lock/reset
 colour range · `f` shutter/recalibrate · `+`/`-` emissivity ±0.05. Hover the mouse to read
-the temperature under the cursor. The **RECORD / STOP** button in the toolbar above the
-image starts and stops recording too and shows the elapsed time; the toolbar is not
-recorded.
+the temperature under the cursor. The toolbar above the image has a **RECORD / STOP**
+button (shows the elapsed time while recording) and a **SNAPSHOT** button (briefly shows
+"SAVED"); they do the same as `v` and `s`. The toolbar itself is not recorded or saved.
 
 Correction options (`--emissivity`, `--distance` in m, `--reflected` and `--ambient` in °C,
 `--transmittance`) are applied by the camera and stay set until it is unplugged; omitted
