@@ -1,0 +1,9 @@
+# Vendor Windows software (not redistributable, large)
+*.exe
+*.zip
+
+# Snapshots written by the viewer
+thermal_*.png
+thermal_*.npy
+
+__pycache__/
