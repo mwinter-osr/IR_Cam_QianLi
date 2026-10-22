@@ -10,13 +10,19 @@ Temperature correction (emissivity, distance, reflected/ambient temperature,
 atmospheric transmittance) is applied by the camera itself; set it with the
 command-line options or adjust emissivity live.
 
-Keys: q quit · s save snapshot (PNG + .npy in °C) · c next colormap · r reset range lock · l lock range
+Video recording writes two files through ffmpeg: <name>.mp4 (the coloured view
+as displayed, H.264) and <name>_raw.mkv (lossless 16-bit temperature data, FFV1
+gray16le, value / 64 = Kelvin).
+
+Keys: q quit · s save snapshot (PNG + .npy in °C) · v start/stop video recording
+      c next colormap · r reset range lock · l lock range
       f shutter / recalibrate now · + / - emissivity ±0.05
 Mouse: hover shows the temperature under the cursor.
 """
 import argparse
 import glob
 import os
+import subprocess
 import sys
 import time
 
@@ -136,14 +142,65 @@ class Camera:
             return None
         return np.frombuffer(frame.tobytes(), dtype="<u2")[:W * H].reshape(H, W)
 
-    def read_celsius(self):
+    def read_frame(self):
+        """Returns (raw, celsius), or None while the camera sends no data yet."""
         raw = self.read_raw()
         if raw is None or (raw == BLANK).all():
             return None
-        return raw.astype(np.float32) / 64.0 - 273.15
+        return raw, raw.astype(np.float32) / 64.0 - 273.15
+
+    def read_celsius(self):
+        frame = self.read_frame()
+        return None if frame is None else frame[1]
 
     def close(self):
         self.cap.release()
+
+
+class Recorder:
+    """Records the displayed view and the raw temperature data through ffmpeg."""
+
+    def __init__(self, base, view_size):
+        self.base = base
+        self.start = time.time()
+        self.frames = 0
+        self.view = self._ffmpeg("bgr24", view_size, base + ".mp4",
+                                 ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+        self.raw = self._ffmpeg("gray16le", (W, H), base + "_raw.mkv", ["-c:v", "ffv1", "-level", "3"])
+
+    @staticmethod
+    def _ffmpeg(pix_fmt, size, path, codec):
+        return subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{size[0]}x{size[1]}",
+             "-use_wallclock_as_timestamps", "1", "-i", "-",
+             *codec, "-fps_mode", "vfr", path],
+            stdin=subprocess.PIPE)
+
+    def write(self, img, raw):
+        self.view.stdin.write(img.tobytes())
+        self.raw.stdin.write(raw.astype("<u2").tobytes())
+        self.frames += 1
+
+    def elapsed(self):
+        return time.time() - self.start
+
+    def stop(self):
+        for proc in (self.view, self.raw):
+            proc.stdin.close()
+            proc.wait()
+        print(f"saved {self.base}.mp4 / {self.base}_raw.mkv ({self.frames} frames, {self.elapsed():.1f} s)")
+
+
+def start_recording(outdir, view_size):
+    base = os.path.join(outdir, time.strftime("thermal_%Y%m%d_%H%M%S"))
+    try:
+        rec = Recorder(base, view_size)
+    except FileNotFoundError:
+        print("Recording needs ffmpeg: sudo apt install ffmpeg")
+        return None
+    print(f"recording to {base}.mp4 / {base}_raw.mkv")
+    return rec
 
 
 def render(temp, cmap, lo, hi, scale, mouse, info=""):
@@ -181,9 +238,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", help="V4L2 device (auto-detected)")
     ap.add_argument("--scale", type=int, default=3, help="display scale factor")
-    ap.add_argument("--outdir", default=".", help="where snapshots are saved")
+    ap.add_argument("--outdir", default=".", help="where snapshots and recordings are saved")
     ap.add_argument("--snapshot", metavar="FILE.png",
                     help="headless: wait for a calibrated frame, save it and exit")
+    ap.add_argument("--record", type=float, metavar="SECONDS",
+                    help="headless: wait for calibration, record SECONDS of video and exit")
     corr = ap.add_argument_group("temperature correction (applied by the camera; omitted = keep current)")
     corr.add_argument("--emissivity", type=float, help="object emissivity 0.01-1.0 (camera default 1.0)")
     corr.add_argument("--distance", type=float, help="object distance in metres (camera default 0.25)")
@@ -223,6 +282,26 @@ def main():
               f"center {temp[H // 2, W // 2]:.1f} °C")
         return
 
+    if args.record:
+        deadline = time.time() + 12   # skip the uncalibrated start-up frames
+        while time.time() < deadline:
+            cam.read_frame()
+        rec = start_recording(args.outdir, (W * args.scale, H * args.scale))
+        if rec is None:
+            cam.close()
+            sys.exit(1)
+        try:
+            while rec.elapsed() < args.record:
+                frame = cam.read_frame()
+                if frame is not None:
+                    raw, temp = frame
+                    rec.write(render(temp, COLORMAPS[0][1], temp.min(), temp.max(), args.scale, None,
+                                     settings_text(settings)), raw)
+        finally:
+            rec.stop()
+            cam.close()
+        return
+
     win = "Thermal camera"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
     mouse = []
@@ -231,17 +310,28 @@ def main():
         mouse[:] = [x, y]
 
     cv2.setMouseCallback(win, on_mouse)
-    cmap_idx, locked = 0, None
+    cmap_idx, locked, rec = 0, None, None
     try:
         while True:
-            temp = cam.read_celsius()
+            frame = cam.read_frame()
+            temp = None if frame is None else frame[1]
             if temp is None:
                 img = np.zeros((H * args.scale, W * args.scale, 3), np.uint8)
                 cv2.putText(img, "waiting for camera...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+                shown = img
             else:
                 lo, hi = locked or (float(temp.min()), float(temp.max()))
                 img = render(temp, COLORMAPS[cmap_idx][1], lo, hi, args.scale, mouse, settings_text(settings))
-            cv2.imshow(win, img)
+                shown = img
+                if rec:
+                    rec.write(img, frame[0])
+                    # the indicator is only drawn on screen, not into the recording
+                    shown = img.copy()
+                    cv2.circle(shown, (shown.shape[1] - 90, 16), 6, (0, 0, 255), -1)
+                    secs = int(rec.elapsed())
+                    cv2.putText(shown, f"REC {secs // 60:02d}:{secs % 60:02d}", (shown.shape[1] - 78, 21),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.imshow(win, shown)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1:
                 break
@@ -253,6 +343,12 @@ def main():
                 locked = (float(temp.min()), float(temp.max()))
             elif key == ord("r"):
                 locked = None
+            elif key == ord("v"):
+                if rec:
+                    rec.stop()
+                    rec = None
+                else:
+                    rec = start_recording(args.outdir, (img.shape[1], img.shape[0]))
             elif key == ord("f"):
                 cam.shutter()
             elif key in (ord("+"), ord("="), ord("-")):
@@ -269,6 +365,8 @@ def main():
                 np.save(base + ".npy", temp)
                 print(f"saved {base}.png / .npy")
     finally:
+        if rec:
+            rec.stop()
         cam.close()
         cv2.destroyAllWindows()
 

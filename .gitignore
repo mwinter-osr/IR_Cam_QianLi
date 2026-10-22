@@ -2,8 +2,10 @@
 *.exe
 *.zip
 
-# Snapshots written by the viewer
+# Snapshots and recordings written by the viewer
 thermal_*.png
 thermal_*.npy
+thermal_*.mp4
+thermal_*.mkv
 
 __pycache__/
